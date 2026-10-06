@@ -1,4 +1,4 @@
-<img src="./portrait.svg" width="460" alt="arwin-tech, drawn in ASCII"/>
+<img src="./portrait.svg" width="460" alt="arwin, drawn in ASCII"/>
 
 <img src="./stats.svg" width="620" alt="Contributions in the last year, with a weekly sparkline"/>
 

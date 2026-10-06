@@ -25,28 +25,46 @@ new profile READMEs are sometimes cached.
 
 ## The portrait
 
-Until you make one, `portrait.svg` prints the word "arwin" in the ramp. To use
-a photo:
+`portrait.svg` is a photo of you drawn in text, with your name typed under it.
+To make a new one, put the photo in this folder and run:
 
 ```powershell
 pip install pillow numpy opencv-python-headless rembg onnxruntime
-python scripts/make_portrait.py me.jpg --preview
+python scripts/make_portrait.py me.jpg --name arwin --preview
 git pull
 git add portrait.svg
 git commit -m "portrait"
 git push
 ```
 
-The photo matters more than any setting:
+The first run downloads a 170 MB model, once. `--preview` also prints the
+characters in the terminal so you can judge before pushing.
+
+Two flags frame the shot. Both take `left,top,right,bottom` in the photo's own
+pixels (Paint shows the pixel position under the cursor, bottom left):
+
+- `--crop` is a wide box around you, shoulders included. The background remover
+  needs that context; a tight crop leaves a smear of wall behind the head.
+- `--focus` zooms to the head and collar inside it, so the whole 90-character
+  grid is spent on the face.
+
+The current portrait used `--crop 60,65,250,310 --focus 102,65,243,226`.
+
+If the result looks wrong:
+
+- Face too dark and flat: raise `--midpoint` a little (`0.45`).
+- Face washed out: lower it (`0.35`).
+- Features look mushy: `--contrast 8`. Too noisy: `--sharpen 0.8`.
+- Want only the portrait: leave `--name` off. Different name: `--name yourword`.
+
+What matters more than any flag is the photo:
 
 - **Side light.** One window at about 45 degrees, every other light off.
-- **Tight crop.** Chin to just above the hair. `--crop left,top,right,bottom`
-  crops before anything else runs.
-- **Big source.** 1200 px or more across. Small headshots lose glasses frames
-  and brows when shrunk to 90 columns.
+- **Resolution.** 1200 px or more across. A small photo is enlarged
+  automatically, but that can't add detail, so eyes and brows stay soft.
 - **Plain background**, and nothing black against a dark wall.
 
-Changed your mind about the placeholder word? `python scripts/make_portrait.py --text yourword`.
+No photo handy? `python scripts/make_portrait.py --text yourword` prints just a word.
 
 ## Day to day
 

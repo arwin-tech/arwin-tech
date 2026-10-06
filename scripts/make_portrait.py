@@ -5,8 +5,14 @@ Run it on your own machine whenever you want a new portrait. It is not part of
 the nightly action.
 
     pip install pillow numpy opencv-python-headless rembg onnxruntime
-    python scripts/make_portrait.py me.jpg --preview
-    python scripts/make_portrait.py me.jpg --crop 420,160,1180,1010
+    python scripts/make_portrait.py me.jpg --name arwin --preview
+    python scripts/make_portrait.py me.jpg --name arwin --crop 60,65,250,310 --focus 102,65,243,226
+
+--name types your name in the same characters, under the portrait. Leave it off
+for the portrait alone. --crop is left,top,right,bottom in the photo's own
+pixels: give it room around you, because the background remover works better
+with context. --focus then zooms to the head and collar, so the whole grid goes
+to the face.
 
 The first photo run downloads a ~170 MB background-removal model, once. The
 model is named explicitly below: recent rembg versions default to a 1 GB model
@@ -19,8 +25,14 @@ No photo yet? Print a word in the same ramp instead (no rembg needed):
 The photo decides almost everything. ASCII draws with shadow rather than
 detail, and the ramp has 13 steps. Use side light (one window at about 45
 degrees, other lights off), crop from the chin to just above the hair, and
-start from a big image: thin features like glasses frames vanish when a small
-headshot is shrunk to 90 columns. Flat frontal light renders the face as a hole.
+start from a big image. A small photo is enlarged automatically, but enlarging
+can't invent detail: thin features like glasses frames and eyelids need real
+pixels, so a 1200 px original will beat a 300 px copy of the same shot.
+
+Tone mapping, in order: stretch the subject's own brightness to the full
+range (so mid-tone skin isn't pushed to the dense end of the ramp), smooth the
+skin while keeping edges, sharpen edges, then apply an S-curve so hair and
+shadow print solid and the lit side of the face prints light.
 
 Two grids are drawn from one photo. In light mode the ink is dark, so dense
 characters stand for shadow. In dark mode the ink is light, so the same
@@ -39,8 +51,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 import profile_style as ps
 
 COLS = 90             # below ~88 the face muddies; far above it, the block dominates
-CLAHE_CLIP = 3.0      # local contrast per tile; higher turns skin texture into noise
-CURVE = 1.7           # the darkening curve, light grid: keeps brows, lips, glasses
+NAME_COLS = 90        # width of the name banner under the portrait
+MIN_SIDE = 1200       # smaller photos are enlarged to this before drawing
+SHARPEN = 1.2         # edge sharpening; more than ~2 turns skin texture to noise
+CONTRAST = 6.0        # steepness of the S-curve
+MIDPOINT = 0.40       # brightness that maps to the middle of the ramp (lower = lighter)
 DARK_CURVE = 1.2      # the dark grid's curve: keeps skin from flattening into @@@@
 MODEL = "u2net_human_seg"   # ~170 MB, trained on people
 
@@ -56,17 +71,29 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ------------------------------------------------------------------ photo
 
 def load(path, crop):
+    """The photo, cropped, and enlarged if it's small.
+
+    Returns (image, scale, origin) so a later box in the photo's own pixels
+    can be mapped onto the enlarged crop.
+    """
     img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+    origin = (0, 0)
     if crop:
         img = img.crop(crop)
-    if max(img.size) < 900:
-        print(f"warning: {img.size[0]}x{img.size[1]} is small; fine features "
-              "will be averaged away. Aim for 1200 px or more.", file=sys.stderr)
-    return img
+        origin = (crop[0], crop[1])
+    k = 1.0
+    side = max(img.size)
+    if side < MIN_SIDE:
+        k = MIN_SIDE / side
+        print(f"note: the photo is {img.size[0]}x{img.size[1]}, so it is enlarged "
+              f"{k:.1f}x first. That can't add detail: a bigger original will "
+              "draw eyes and brows more clearly.", file=sys.stderr)
+        img = img.resize((round(img.width * k), round(img.height * k)), Image.LANCZOS)
+    return img, k, origin
 
 
 def cut_out(img, model):
-    """Remove the background and crop to the person.
+    """Remove the background. Returns (gray, alpha), same size as the input.
 
     Everything outside the subject is composited to white, which lands on the
     blank end of the ramp. Skip this and the background fills with @ and %.
@@ -77,34 +104,50 @@ def cut_out(img, model):
         sys.exit("rembg is needed for photos:  pip install rembg onnxruntime\n"
                  "(or try --text to print a word instead)")
     rgba = remove(img, session=new_session(model))
-    alpha = np.asarray(rgba.getchannel("A"))
-
-    ys, xs = np.nonzero(alpha > 20)
-    if len(xs) == 0:
-        sys.exit("couldn't find a person in that photo")
-    pad = int(0.02 * max(alpha.shape))
-    box = (max(xs.min() - pad, 0), max(ys.min() - pad, 0),
-           min(xs.max() + pad, alpha.shape[1]), min(ys.max() + pad, alpha.shape[0]))
-    rgba = rgba.crop(box)
-
     white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
     gray = np.asarray(Image.alpha_composite(white, rgba).convert("L"))
     return gray, np.asarray(rgba.getchannel("A"))
 
 
-def tone(gray):
-    gray = cv2.bilateralFilter(gray, 11, 50, 50)    # smooth skin, keep edges
-    return cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=(8, 8)).apply(gray)
+def frame(gray, alpha, box=None):
+    """Zoom to `box` (x0, y0, x1, y1), then trim to the subject."""
+    if box:
+        x0, y0, x1, y1 = (max(int(v), 0) for v in box)
+        gray, alpha = gray[y0:y1, x0:x1], alpha[y0:y1, x0:x1]
+    ys, xs = np.nonzero(alpha > 20)
+    if len(xs) == 0:
+        sys.exit("couldn't find a person in that photo")
+    pad = int(0.02 * max(alpha.shape))
+    y0, y1 = max(ys.min() - pad, 0), min(ys.max() + pad, alpha.shape[0])
+    x0, x1 = max(xs.min() - pad, 0), min(xs.max() + pad, alpha.shape[1])
+    return gray[y0:y1, x0:x1], alpha[y0:y1, x0:x1]
 
 
-def grids_from_photo(gray, alpha, cols):
+def tone(gray, alpha, sharpen, contrast, mid):
+    """Brightness, 0 to 1, with the subject spread across the whole range."""
+    g = gray.astype(float)
+    inside = alpha > 200
+    lo, hi = np.percentile(g[inside], [1, 99])
+    g = np.clip((g - lo) / max(hi - lo, 1), 0, 1)
+    g[alpha <= 20] = 1.0                                   # the matte stays white
+
+    g = cv2.bilateralFilter((g * 255).astype(np.uint8), 9, 40, 40) / 255.0
+    if sharpen:
+        blur = cv2.GaussianBlur(g, (0, 0), 8)
+        g = np.clip(g + sharpen * (g - blur), 0, 1)
+    g = 1 / (1 + np.exp(-contrast * (g - mid)))            # S-curve
+    return (g - g.min()) / max(g.max() - g.min(), 1e-6)
+
+
+def grids_from_photo(gray, alpha, cols, sharpen=SHARPEN, contrast=CONTRAST, mid=MIDPOINT):
     rows = max(1, round(cols * gray.shape[0] / gray.shape[1] * ROW_RATIO))
-    lum = cv2.resize(tone(gray), (cols, rows), interpolation=cv2.INTER_AREA) / 255.0
+    lum = cv2.resize(tone(gray, alpha, sharpen, contrast, mid), (cols, rows),
+                     interpolation=cv2.INTER_AREA)
     cov = cv2.resize(alpha, (cols, rows), interpolation=cv2.INTER_AREA) / 255.0
     n = len(ps.RAMP)
 
-    # light mode: ink follows darkness, after the darkening curve
-    dark_amt = 1.0 - lum ** CURVE
+    # light mode: ink follows darkness
+    dark_amt = 1.0 - lum
     dark_amt[cov < 0.08] = 0.0
     light = (dark_amt * n).astype(int).clip(0, n - 1)
 
@@ -230,8 +273,19 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "portrait.svg"))
     ap.add_argument("--crop", help="left,top,right,bottom in pixels, applied first. "
                                    "Crop tight so the whole grid goes to the face")
+    ap.add_argument("--focus", help="left,top,right,bottom in the photo's own pixels. "
+                                    "The background is removed from the whole --crop (it "
+                                    "needs the context), then the portrait zooms to this box")
     ap.add_argument("--cols", type=int, default=COLS)
-    ap.add_argument("--font", help="bold .ttf for --text")
+    ap.add_argument("--name", help="type this word under the portrait, in the same characters")
+    ap.add_argument("--name-cols", type=int, default=NAME_COLS)
+    ap.add_argument("--sharpen", type=float, default=SHARPEN,
+                    help=f"edge sharpening (default {SHARPEN})")
+    ap.add_argument("--contrast", type=float, default=CONTRAST,
+                    help=f"S-curve steepness (default {CONTRAST}); higher = starker")
+    ap.add_argument("--midpoint", type=float, default=MIDPOINT,
+                    help=f"lower it to lighten the whole face (default {MIDPOINT})")
+    ap.add_argument("--font", help="bold .ttf for --text and --name")
     ap.add_argument("--model", default=MODEL,
                     help=f"rembg model (default {MODEL}; u2net or isnet-general-use also work)")
     ap.add_argument("--alt", default="arwin-tech, drawn in ASCII")
@@ -252,10 +306,24 @@ def main():
                 assert len(crop) == 4
             except (ValueError, AssertionError):
                 ap.error("--crop needs four whole numbers: left,top,right,bottom")
-        gray, alpha = cut_out(load(args.photo, crop), args.model)
-        light, dark = grids_from_photo(gray, alpha, args.cols)
+        img, k, (ox, oy) = load(args.photo, crop)
+        gray, alpha = cut_out(img, args.model)
+        box = None
+        if args.focus:
+            try:
+                f = [int(v) for v in args.focus.split(",")]
+                assert len(f) == 4
+            except (ValueError, AssertionError):
+                ap.error("--focus needs four whole numbers: left,top,right,bottom")
+            box = ((f[0] - ox) * k, (f[1] - oy) * k, (f[2] - ox) * k, (f[3] - oy) * k)
+        gray, alpha = frame(gray, alpha, box)
+        light, dark = grids_from_photo(gray, alpha, args.cols, args.sharpen, args.contrast, args.midpoint)
 
     lines = to_lines(light, dark)
+    if args.name and not args.text:
+        n_light, n_dark = grid_from_text(args.name, args.name_cols, args.font)
+        banner = to_lines(n_light, n_dark)
+        lines = lines + [("", "")] * 2 + banner
     if args.preview:
         print("light mode\n" + "\n".join(a for a, _ in lines))
         if any(a != b for a, b in lines):
