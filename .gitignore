@@ -1,0 +1,11 @@
+# Photos you feed make_portrait.py stay on your machine
+*.jpg
+*.jpeg
+*.heic
+*.webp
+/*.png
+
+# Offline copies of the API response (generate_stats.py --dump)
+data.json
+
+__pycache__/

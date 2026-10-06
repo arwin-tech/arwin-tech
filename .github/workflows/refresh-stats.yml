@@ -1,0 +1,46 @@
+name: refresh stats
+
+# No `push` trigger on purpose: this job commits, and a push trigger would make
+# it run again on its own commit.
+on:
+  schedule:
+    - cron: "17 5 * * *"     # 05:17 UTC, 09:17 in Dubai
+  workflow_dispatch:         # the "Run workflow" button, for the first run
+
+permissions:
+  contents: write            # lets the built-in token push the redrawn SVGs
+
+concurrency:
+  group: refresh-stats
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # Standard library only: no pip install, nothing to break.
+      - name: Draw the stat graphics
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_LOGIN: ${{ github.repository_owner }}
+        run: python3 scripts/generate_stats.py
+
+      # The year map moves forward a day each night, so most runs commit. Those
+      # commits belong to github-actions[bot], not you, so they don't pad your
+      # graph, and they keep the repo active (GitHub pauses schedules in public
+      # repos after 60 quiet days).
+      - name: Commit only what changed
+        run: |
+          FILES="stats.svg streak.svg langs.svg year.svg hd-*.svg"
+          if [ -z "$(git status --porcelain -- $FILES)" ]; then
+            echo "nothing changed"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- $FILES
+          git commit -m "stats: refresh profile graphics"
+          git push
